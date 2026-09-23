@@ -10,13 +10,13 @@ from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 
-from app.tools.order_tools import get_order_status
+from app.tools.order_tools import get_order_status, check_return_eligibility
 from app.prompts.extraction_prompt import SYSTEM_PROMPT
 from app.schemas.ticket import TicketAnalysis
 
 load_dotenv()
 llm = ChatGroq(model="openai/gpt-oss-120b", api_key=os.environ["GROQ_API_KEY"])
-llm_with_tools = llm.bind_tools([get_order_status])
+llm_with_tools = llm.bind_tools([get_order_status, check_return_eligibility])
 
 class LLMUnavailableError(Exception):
     """LLM çağrısı başarısız olduğunda fırlatılır (timeout, rate limit, bağlantı hatası vb.)."""
@@ -58,28 +58,37 @@ async def extract_node(state: TicketState) -> dict:
         ai_response = await llm_with_tools.ainvoke(messages)
         messages.append(ai_response)
 
-        tool_result = None
+        tool_results = {}
         if ai_response.tool_calls:
             for tool_call in ai_response.tool_calls:
-                result = get_order_status.invoke(tool_call["args"])
-                tool_result = result
+                if tool_call["name"] == "get_order_status":
+                    result = get_order_status.invoke(tool_call["args"])
+                elif tool_call["name"] == "check_return_eligibility":
+                    result = check_return_eligibility.invoke(tool_call["args"])
+                else:
+                    result = {"error": "unknown tool"}
+
+                tool_results[tool_call["name"]] = result
                 messages.append(ToolMessage(content=str(result), tool_call_id=tool_call["id"]))
 
             final_response = await llm_with_tools.ainvoke(messages)
         else:
             final_response = ai_response
 
+        order_info = tool_results.get("get_order_status")
+
         structured_llm = llm.with_structured_output(TicketAnalysis)
         analysis = await structured_llm.ainvoke(
             f"Şu bilgilere göre yapılandırılmış analiz üret:\n"
             f"Müşteri mesajı: {state['raw_message']}\n"
-            f"Sipariş bilgisi: {tool_result}\n"
+            f"Toplanan bilgiler: {tool_results}\n"
             f"Model notu: {final_response.content}"
         )
     except Exception as exc:
         raise LLMUnavailableError(f"LLM çağrısı başarısız oldu: {exc}") from exc
 
-    return {"analysis": analysis.model_dump(), "order_info": tool_result}
+    return {"analysis": analysis.model_dump(), "order_info": order_info}
+
 
 async def auto_respond_node(state: TicketState) -> dict:
     order = state.get("order_info")

@@ -11,3 +11,16 @@ def get_order_status(order_id: str) -> dict:
     if order is None:
         return {"not_found": True, "order_id": order_id}
     return order
+
+@tool
+def check_return_eligibility(order_id: str) -> dict:
+    """Verilen sipariş numarasının iadeye uygun olup olmadığını kontrol eder.
+    Sipariş bulunamazsa 'not_found': True içeren bir sonuç döner."""
+    order = _get_order(order_id)
+    if order is None:
+        return {"not_found": True, "order_id": order_id}
+    return {
+        "order_id": order_id,
+        "return_eligible": order.get("return_eligible", False),
+        "status": order.get("status"),
+    }

@@ -4,6 +4,9 @@ Görevin, müşteri mesajını analiz edip yapılandırılmış bir sonuç üret
 Eğer mesajda bir sipariş numarası (ORD-XXXXX formatında) geçiyorsa,
 sipariş durumunu öğrenmek için get_order_status tool'unu çağır.
 
+Eğer müşteri iade talep ediyorsa, check_return_eligibility tool'unu da
+çağırarak iade uygunluğunu kontrol et.
+
 Tool sonucunu aldıktan sonra, şu alanları içeren bir analiz üret:
 - topic: shipping_delay, refund_request, complaint, other
 - urgency: low, medium, high
