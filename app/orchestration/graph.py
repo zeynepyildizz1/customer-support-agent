@@ -81,3 +81,10 @@ def build_graph():
     graph.add_edge("await_approval", END)  # Gün 2'de bu satır kalkacak, interrupt gelecek
 
     return graph.compile()
+
+_compiled_graph = build_graph()
+
+
+async def run_ticket_flow(message: str) -> dict:
+    result = await _compiled_graph.ainvoke({"raw_message": message})
+    return result
