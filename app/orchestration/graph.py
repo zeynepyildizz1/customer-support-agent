@@ -5,6 +5,18 @@ from app.data.mock_orders import get_order
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt
+import os
+from dotenv import load_dotenv
+from langchain_groq import ChatGroq
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+
+from app.tools.order_tools import get_order_status
+from app.prompts.extraction_prompt import SYSTEM_PROMPT
+from app.schemas.ticket import TicketAnalysis
+
+load_dotenv()
+llm = ChatGroq(model="openai/gpt-oss-120b", api_key=os.environ["GROQ_API_KEY"])
+llm_with_tools = llm.bind_tools([get_order_status])
 
 class TicketState(TypedDict):
     raw_message: str
@@ -33,20 +45,46 @@ def fake_extract(message: str) -> dict:
     }
 
 async def extract_node(state: TicketState) -> dict:
-    analysis = fake_extract(state["raw_message"])
-    return {"analysis": analysis}
+    messages = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=state["raw_message"]),
+    ]
 
+    ai_response = await llm_with_tools.ainvoke(messages)
+    messages.append(ai_response)
 
-async def fetch_order_node(state: TicketState) -> dict:
-    order_id = state["analysis"].get("order_id")
-    if order_id is None:
-        return {"order_info": None}
-    return {"order_info": get_order(order_id)}
+    tool_result = None
+    if ai_response.tool_calls:
+        for tool_call in ai_response.tool_calls:
+            result = get_order_status.invoke(tool_call["args"])
+            tool_result = result
+            messages.append(ToolMessage(content=str(result), tool_call_id=tool_call["id"]))
+
+        final_response = await llm_with_tools.ainvoke(messages)
+    else:
+        final_response = ai_response
+
+    structured_llm = llm.with_structured_output(TicketAnalysis)
+    analysis = await structured_llm.ainvoke(
+        f"Şu bilgilere göre yapılandırılmış analiz üret:\n"
+        f"Müşteri mesajı: {state['raw_message']}\n"
+        f"Sipariş bilgisi: {tool_result}\n"
+        f"Model notu: {final_response.content}"
+    )
+
+    return {"analysis": analysis.model_dump(), "order_info": tool_result}
 
 
 async def auto_respond_node(state: TicketState) -> dict:
-    return {"final_response": "Talebiniz alınmıştır, standart süreçte işleme konulacaktır."}
-
+    order = state.get("order_info")
+    if order and not order.get("not_found"):
+        response = (
+            f"Talebiniz alınmıştır. Sipariş durumu: {order['status']}, "
+            f"kargo takip no: {order.get('tracking_number', 'yok')}."
+        )
+    else:
+        response = "Talebiniz alınmıştır, ancak sipariş bilginize ulaşılamadı."
+    return {"final_response": response}
 
 async def await_approval_node(state: TicketState) -> dict:
     decision = interrupt({
@@ -59,6 +97,7 @@ async def await_approval_node(state: TicketState) -> dict:
         return {"final_response": f"Talebiniz onaylandı. Not: {decision.get('note', '')}"}
     else:
         return {"final_response": f"Talebiniz değerlendirildi, onaylanmadı. Not: {decision.get('note', '')}"}
+
 def route_by_risk(state: TicketState) -> str:
     analysis = state["analysis"]
     if analysis["urgency"] == "high" or analysis.get("legal_threat"):
@@ -69,15 +108,13 @@ def build_graph():
     graph = StateGraph(TicketState)
 
     graph.add_node("extract", extract_node)
-    graph.add_node("fetch_order", fetch_order_node)
     graph.add_node("auto_respond", auto_respond_node)
     graph.add_node("await_approval", await_approval_node)
 
     graph.set_entry_point("extract")
-    graph.add_edge("extract", "fetch_order")
 
     graph.add_conditional_edges(
-        "fetch_order",
+        "extract",
         route_by_risk,
         {
             "not_risky": "auto_respond",
@@ -86,7 +123,7 @@ def build_graph():
     )
 
     graph.add_edge("auto_respond", END)
-    graph.add_edge("await_approval", END)  # Gün 2'de bu satır kalkacak, interrupt gelecek
+    graph.add_edge("await_approval", END)
 
     checkpointer = MemorySaver()
     return graph.compile(checkpointer=checkpointer)
