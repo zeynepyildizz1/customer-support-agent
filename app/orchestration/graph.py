@@ -18,6 +18,10 @@ load_dotenv()
 llm = ChatGroq(model="openai/gpt-oss-120b", api_key=os.environ["GROQ_API_KEY"])
 llm_with_tools = llm.bind_tools([get_order_status])
 
+class LLMUnavailableError(Exception):
+    """LLM çağrısı başarısız olduğunda fırlatılır (timeout, rate limit, bağlantı hatası vb.)."""
+    pass
+
 class TicketState(TypedDict):
     raw_message: str
     analysis: dict | None
@@ -50,30 +54,32 @@ async def extract_node(state: TicketState) -> dict:
         HumanMessage(content=state["raw_message"]),
     ]
 
-    ai_response = await llm_with_tools.ainvoke(messages)
-    messages.append(ai_response)
+    try:
+        ai_response = await llm_with_tools.ainvoke(messages)
+        messages.append(ai_response)
 
-    tool_result = None
-    if ai_response.tool_calls:
-        for tool_call in ai_response.tool_calls:
-            result = get_order_status.invoke(tool_call["args"])
-            tool_result = result
-            messages.append(ToolMessage(content=str(result), tool_call_id=tool_call["id"]))
+        tool_result = None
+        if ai_response.tool_calls:
+            for tool_call in ai_response.tool_calls:
+                result = get_order_status.invoke(tool_call["args"])
+                tool_result = result
+                messages.append(ToolMessage(content=str(result), tool_call_id=tool_call["id"]))
 
-        final_response = await llm_with_tools.ainvoke(messages)
-    else:
-        final_response = ai_response
+            final_response = await llm_with_tools.ainvoke(messages)
+        else:
+            final_response = ai_response
 
-    structured_llm = llm.with_structured_output(TicketAnalysis)
-    analysis = await structured_llm.ainvoke(
-        f"Şu bilgilere göre yapılandırılmış analiz üret:\n"
-        f"Müşteri mesajı: {state['raw_message']}\n"
-        f"Sipariş bilgisi: {tool_result}\n"
-        f"Model notu: {final_response.content}"
-    )
+        structured_llm = llm.with_structured_output(TicketAnalysis)
+        analysis = await structured_llm.ainvoke(
+            f"Şu bilgilere göre yapılandırılmış analiz üret:\n"
+            f"Müşteri mesajı: {state['raw_message']}\n"
+            f"Sipariş bilgisi: {tool_result}\n"
+            f"Model notu: {final_response.content}"
+        )
+    except Exception as exc:
+        raise LLMUnavailableError(f"LLM çağrısı başarısız oldu: {exc}") from exc
 
     return {"analysis": analysis.model_dump(), "order_info": tool_result}
-
 
 async def auto_respond_node(state: TicketState) -> dict:
     order = state.get("order_info")
@@ -144,6 +150,29 @@ async def start_ticket_flow(ticket_id: str, message: str) -> dict:
 async def resume_ticket_flow(ticket_id: str, decision: dict) -> dict:
     from langgraph.types import Command
 
+    status = await get_ticket_status(ticket_id)
+    if status != "waiting":
+        raise TicketNotWaitingError(f"'{ticket_id}' zaten tamamlanmış, tekrar sürdürülemez.")
+
     config = {"configurable": {"thread_id": ticket_id}}
     result = await _compiled_graph.ainvoke(Command(resume=decision), config=config)
     return result
+
+class TicketNotFoundError(Exception):
+    """Verilen ticket_id için kayıtlı bir state bulunamadığında fırlatılır."""
+    pass
+
+
+class TicketNotWaitingError(Exception):
+    """Ticket zaten tamamlanmış veya beklemede değilken resume çağrıldığında fırlatılır."""
+    pass
+
+
+async def get_ticket_status(ticket_id: str) -> str:
+    config = {"configurable": {"thread_id": ticket_id}}
+    state = await _compiled_graph.aget_state(config)
+
+    if not state.values:
+        raise TicketNotFoundError(f"'{ticket_id}' için kayıtlı bir talep bulunamadı.")
+
+    return "waiting" if state.next else "completed"
