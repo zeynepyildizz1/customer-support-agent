@@ -3,6 +3,8 @@ from langgraph.graph import StateGraph, END
 
 from app.data.mock_orders import get_order
 
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import interrupt
 
 class TicketState(TypedDict):
     raw_message: str
@@ -47,10 +49,16 @@ async def auto_respond_node(state: TicketState) -> dict:
 
 
 async def await_approval_node(state: TicketState) -> dict:
-    # Gün 2'de burayı interrupt() ile dolduracağız.
-    # Şimdilik sadece sahte bir mesaj dönüyoruz.
-    return {"final_response": "İnceleme bekleniyor (henüz gerçek durdurma mekanizması yok)."}
+    decision = interrupt({
+        "reason": "high_risk",
+        "analysis": state["analysis"],
+        "order_info": state["order_info"],
+    })
 
+    if decision["decision"] == "approve":
+        return {"final_response": f"Talebiniz onaylandı. Not: {decision.get('note', '')}"}
+    else:
+        return {"final_response": f"Talebiniz değerlendirildi, onaylanmadı. Not: {decision.get('note', '')}"}
 def route_by_risk(state: TicketState) -> str:
     analysis = state["analysis"]
     if analysis["urgency"] == "high" or analysis.get("legal_threat"):
@@ -80,11 +88,25 @@ def build_graph():
     graph.add_edge("auto_respond", END)
     graph.add_edge("await_approval", END)  # Gün 2'de bu satır kalkacak, interrupt gelecek
 
-    return graph.compile()
+    checkpointer = MemorySaver()
+    return graph.compile(checkpointer=checkpointer)
 
 _compiled_graph = build_graph()
 
 
-async def run_ticket_flow(message: str) -> dict:
-    result = await _compiled_graph.ainvoke({"raw_message": message})
+async def start_ticket_flow(ticket_id: str, message: str) -> dict:
+    config = {"configurable": {"thread_id": ticket_id}}
+    result = await _compiled_graph.ainvoke({"raw_message": message}, config=config)
+
+    state = await _compiled_graph.aget_state(config)
+    is_waiting = bool(state.next)
+
+    return {"result": result, "is_waiting": is_waiting}
+
+
+async def resume_ticket_flow(ticket_id: str, decision: dict) -> dict:
+    from langgraph.types import Command
+
+    config = {"configurable": {"thread_id": ticket_id}}
+    result = await _compiled_graph.ainvoke(Command(resume=decision), config=config)
     return result
