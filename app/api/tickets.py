@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from app.orchestration.graph import (
     start_ticket_flow,
     resume_ticket_flow,
+    get_ticket_steps,
     LLMUnavailableError,
     TicketNotFoundError,
     TicketNotWaitingError,
@@ -31,17 +32,25 @@ async def create_ticket(request: TicketRequest):
             detail="Şu anda talebinizi işleyemiyoruz, lütfen daha sonra tekrar deneyin."
         )
 
+    steps = await get_ticket_steps(ticket_id)
+
     if outcome["is_waiting"]:
+        payload = outcome.get("interrupt_payload") or {}
+        reasons = payload.get("risk_reasons", [])
+        reason_text = " ".join(reasons) if reasons else "Yüksek risk tespit edildi, inceleme bekleniyor."
+
         return TicketResponse(
             ticket_id=ticket_id,
             status="pending_approval",
-            reason_for_review="Yüksek risk tespit edildi, inceleme bekleniyor.",
+            reason_for_review=reason_text,
+            steps_summary=steps,
         )
 
     return TicketResponse(
         ticket_id=ticket_id,
         status="completed",
         response=outcome["result"]["final_response"],
+        steps_summary=steps,
     )
 
 
@@ -57,8 +66,11 @@ async def resume_ticket(ticket_id: str, request: ResumeRequest):
     except TicketNotWaitingError:
         raise HTTPException(status_code=409, detail="Bu talep zaten tamamlanmış.")
 
+    steps = await get_ticket_steps(ticket_id)
+
     return TicketResponse(
         ticket_id=ticket_id,
         status="completed",
         response=result["final_response"],
+        steps_summary=steps,
     )

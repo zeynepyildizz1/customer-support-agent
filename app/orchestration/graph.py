@@ -22,17 +22,52 @@ class LLMUnavailableError(Exception):
     """LLM çağrısı başarısız olduğunda fırlatılır (timeout, rate limit, bağlantı hatası vb.)."""
     pass
 
+class TicketNotFoundError(Exception):
+    """Verilen ticket_id için kayıtlı bir state bulunamadığında fırlatılır."""
+    pass
+
+
+class TicketNotWaitingError(Exception):
+    """Ticket zaten tamamlanmış veya beklemede değilken resume çağrıldığında fırlatılır."""
+    pass
+
+
 class TicketState(TypedDict):
     raw_message: str
     analysis: dict | None
     order_info: dict | None
     final_response: str | None
+    risk_reasons: list[str]
+    steps: list[str]
+    order_id_valid: bool
 
-def fake_extract(message: str) -> dict:
-    """
-    Gerçek LLM yerine geçici, kural tabanlı sahte analiz.
-    Gün 2'de gerçek LLM çağrısıyla değiştirilecek.
-    """
+
+async def validate_order_node(state: TicketState) -> dict:
+    message = state["raw_message"]
+
+    order_id = None
+    for word in message.split():
+        if word.startswith("ORD-"):
+            order_id = word.strip(".,!?")
+            break
+
+    if order_id is None:
+        return {"order_id_valid": True, "steps": ["Mesajda sipariş numarası belirtilmemiş, geçildi."]}
+
+    order = get_order(order_id)
+    if order is None:
+        return {
+            "order_id_valid": False,
+            "final_response": f"Belirttiğiniz sipariş numarası ({order_id}) sistemimizde bulunamadı. Lütfen numarayı kontrol edip tekrar deneyin.",
+            "steps": [f"Sipariş numarası ({order_id}) doğrulandı: bulunamadı, LLM'e gidilmeden yanıt üretildi."],
+        }
+
+    return {"order_id_valid": True, "steps": [f"Sipariş numarası ({order_id}) doğrulandı: geçerli."]}
+
+"""def fake_extract(message: str) -> dict:
+    
+    Gerçek LLM yerine geçici, kural tabanlı sahte analiz. ilk etapta kullanıldı
+    
     urgency = "high" if ("hakem" in message or "iade" in message or "avukat" in message) else "low"
 
     order_id = None
@@ -46,7 +81,7 @@ def fake_extract(message: str) -> dict:
         "urgency": urgency,
         "order_id": order_id,
         "legal_threat": "hakem" in message or "avukat" in message,
-    }
+    }"""
 
 async def extract_node(state: TicketState) -> dict:
     messages = [
@@ -87,7 +122,14 @@ async def extract_node(state: TicketState) -> dict:
     except Exception as exc:
         raise LLMUnavailableError(f"LLM çağrısı başarısız oldu: {exc}") from exc
 
-    return {"analysis": analysis.model_dump(), "order_info": order_info}
+    steps = state.get("steps", []) + ["Müşteri mesajı analiz edildi."]
+    if tool_results:
+        called_tools = ", ".join(tool_results.keys())
+        steps.append(f"Şu tool(lar) çağrıldı: {called_tools}.")
+    else:
+        steps.append("Hiçbir tool çağrılmadı (sipariş numarası bulunamadı veya gerekli görülmedi).")
+
+    return {"analysis": analysis.model_dump(), "order_info": order_info, "steps": steps}
 
 
 async def auto_respond_node(state: TicketState) -> dict:
@@ -99,35 +141,75 @@ async def auto_respond_node(state: TicketState) -> dict:
         )
     else:
         response = "Talebiniz alınmıştır, ancak sipariş bilginize ulaşılamadı."
-    return {"final_response": response}
+
+    steps = state.get("steps", []) + ["Düşük riskli bulundu, otomatik yanıt üretildi."]
+    return {"final_response": response, "steps": steps}
+
 
 async def await_approval_node(state: TicketState) -> dict:
+    reasons = get_risk_reasons(state)
+
+    steps_before_wait = state.get("steps", []) + [
+        f"Riskli bulundu ({'; '.join(reasons)}), insan onayı bekleniyor."
+    ]
+
     decision = interrupt({
         "reason": "high_risk",
+        "risk_reasons": reasons,
         "analysis": state["analysis"],
         "order_info": state["order_info"],
     })
 
     if decision["decision"] == "approve":
-        return {"final_response": f"Talebiniz onaylandı. Not: {decision.get('note', '')}"}
+        response = f"Talebiniz onaylandı. Not: {decision.get('note', '')}"
+        final_steps = steps_before_wait + ["Destek uzmanı onayladı, final yanıt üretildi."]
     else:
-        return {"final_response": f"Talebiniz değerlendirildi, onaylanmadı. Not: {decision.get('note', '')}"}
+        response = f"Talebiniz değerlendirildi, onaylanmadı. Not: {decision.get('note', '')}"
+        final_steps = steps_before_wait + ["Destek uzmanı reddetti, final yanıt üretildi."]
+
+    return {"final_response": response, "steps": final_steps}
+
+
+def get_risk_reasons(state: TicketState) -> list[str]:
+    analysis = state["analysis"]
+    order_info = state.get("order_info") or {}
+    reasons = []
+
+    if analysis["urgency"] == "high":
+        reasons.append("Yüksek aciliyet tespit edildi.")
+    if analysis.get("legal_threat"):
+        reasons.append("Hukuki tehdit içeriyor.")
+    if analysis["topic"] == "refund_request" and order_info.get("amount", 0) > 1000:
+        reasons.append(f"Yüksek tutarlı iade talebi ({order_info.get('amount')} TL).")
+
+    return reasons
+
+def route_by_order_validity(state: TicketState) -> str:
+    return "valid" if state.get("order_id_valid", True) else "invalid"
 
 def route_by_risk(state: TicketState) -> str:
-    analysis = state["analysis"]
-    if analysis["urgency"] == "high" or analysis.get("legal_threat"):
-        return "risky"
-    return "not_risky"
+    reasons = get_risk_reasons(state)
+    return "risky" if reasons else "not_risky"
+
 
 def build_graph():
     graph = StateGraph(TicketState)
 
+    graph.add_node("validate_order", validate_order_node)
     graph.add_node("extract", extract_node)
     graph.add_node("auto_respond", auto_respond_node)
     graph.add_node("await_approval", await_approval_node)
 
-    graph.set_entry_point("extract")
+    graph.set_entry_point("validate_order")
 
+    graph.add_conditional_edges(
+            "validate_order",
+            route_by_order_validity,
+            {
+                "invalid": END,
+                "valid": "extract",
+            }
+        )
     graph.add_conditional_edges(
         "extract",
         route_by_risk,
@@ -153,8 +235,11 @@ async def start_ticket_flow(ticket_id: str, message: str) -> dict:
     state = await _compiled_graph.aget_state(config)
     is_waiting = bool(state.next)
 
-    return {"result": result, "is_waiting": is_waiting}
+    interrupt_payload = None
+    if "__interrupt__" in result:
+        interrupt_payload = result["__interrupt__"][0].value
 
+    return {"result": result, "is_waiting": is_waiting, "interrupt_payload": interrupt_payload}
 
 async def resume_ticket_flow(ticket_id: str, decision: dict) -> dict:
     from langgraph.types import Command
@@ -167,15 +252,6 @@ async def resume_ticket_flow(ticket_id: str, decision: dict) -> dict:
     result = await _compiled_graph.ainvoke(Command(resume=decision), config=config)
     return result
 
-class TicketNotFoundError(Exception):
-    """Verilen ticket_id için kayıtlı bir state bulunamadığında fırlatılır."""
-    pass
-
-
-class TicketNotWaitingError(Exception):
-    """Ticket zaten tamamlanmış veya beklemede değilken resume çağrıldığında fırlatılır."""
-    pass
-
 
 async def get_ticket_status(ticket_id: str) -> str:
     config = {"configurable": {"thread_id": ticket_id}}
@@ -185,3 +261,8 @@ async def get_ticket_status(ticket_id: str) -> str:
         raise TicketNotFoundError(f"'{ticket_id}' için kayıtlı bir talep bulunamadı.")
 
     return "waiting" if state.next else "completed"
+
+async def get_ticket_steps(ticket_id: str) -> list[str]:
+    config = {"configurable": {"thread_id": ticket_id}}
+    state = await _compiled_graph.aget_state(config)
+    return state.values.get("steps", [])

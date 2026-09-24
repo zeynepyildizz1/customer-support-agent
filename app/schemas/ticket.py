@@ -17,6 +17,8 @@ class TicketResponse(BaseModel):
     status: Literal["completed", "pending_approval"]
     response: str | None = None
     reason_for_review: str | None = None
+    steps_summary: list[str] = []
+    
 
 class ResumeRequest(BaseModel):
     decision: Literal["approve", "reject"]
