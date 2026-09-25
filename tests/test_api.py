@@ -5,7 +5,10 @@ import pytest
 async def test_health(client):
     resp = await client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert "dependencies" in body
+    assert body["dependencies"]["groq_api_key_configured"] is True
 
 
 @pytest.mark.asyncio
