@@ -1,6 +1,6 @@
 import uuid
 from fastapi import APIRouter
-
+from fastapi.responses import RedirectResponse
 import os
 from app.schemas.ticket import TicketRequest, TicketResponse
 from app.schemas.ticket import ResumeRequest
@@ -15,6 +15,9 @@ from app.orchestration.graph import (
 )
 router = APIRouter()
 
+@router.get("/")
+async def root():
+    return RedirectResponse(url="/docs")
 
 @router.get("/health")
 async def health():
