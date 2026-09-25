@@ -88,12 +88,29 @@ Beklenen yanıt:
 }
 ```
 
-Bu talebi sürdürmek için:
+Bu talebi sürdürmek için (`ticket_id`'yi kendi aldığınız değerle değiştirin):
 
 ```bash
-curl -X POST http://127.0.0.1:8000/tickets/abc-123-.../resume \
+curl -X POST http://127.0.0.1:8000/tickets/e1914827-bd71-4e6f-8c86-89f7e4be5e14/resume \
   -H "Content-Type: application/json" \
   -d '{"decision": "approve", "note": "Müşteri sadık, onaylandı"}'
+```
+
+Beklenen yanıt:
+```json
+{
+  "ticket_id": "af0b8f6d-1a3f-4683-916f-f96c197bd77d",
+  "status": "completed",
+  "response": "Talebiniz onaylandı. Not: Müşteri sadık, onaylandı",
+  "reason_for_review": null,
+  "steps_summary": [
+    "Sipariş numarası (ORD-10432) doğrulandı: geçerli.",
+    "Müşteri mesajı analiz edildi.",
+    "Şu tool(lar) çağrıldı: get_order_status.",
+    "Riskli bulundu (Yüksek aciliyet tespit edildi.; Hukuki tehdit içeriyor.; Yüksek tutarlı iade talebi (1250.0 TL).), insan onayı bekleniyor.",
+    "Destek uzmanı onayladı, final yanıt üretildi."
+  ]
+}
 ```
 
 ## 4. Test Komutu
