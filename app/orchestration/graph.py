@@ -145,13 +145,13 @@ async def auto_respond_node(state: TicketState) -> dict:
     steps = state.get("steps", []) + ["Düşük riskli bulundu, otomatik yanıt üretildi."]
     return {"final_response": response, "steps": steps}
 
+async def prepare_approval_node(state: TicketState) -> dict:
+    reasons = get_risk_reasons(state)
+    steps = state.get("steps", []) + [f"Riskli bulundu ({'; '.join(reasons)}), insan onayı bekleniyor."]
+    return {"steps": steps}
 
 async def await_approval_node(state: TicketState) -> dict:
     reasons = get_risk_reasons(state)
-
-    steps_before_wait = state.get("steps", []) + [
-        f"Riskli bulundu ({'; '.join(reasons)}), insan onayı bekleniyor."
-    ]
 
     decision = interrupt({
         "reason": "high_risk",
@@ -162,10 +162,10 @@ async def await_approval_node(state: TicketState) -> dict:
 
     if decision["decision"] == "approve":
         response = f"Talebiniz onaylandı. Not: {decision.get('note', '')}"
-        final_steps = steps_before_wait + ["Destek uzmanı onayladı, final yanıt üretildi."]
+        final_steps = state.get("steps", []) + ["Destek uzmanı onayladı, final yanıt üretildi."]
     else:
         response = f"Talebiniz değerlendirildi, onaylanmadı. Not: {decision.get('note', '')}"
-        final_steps = steps_before_wait + ["Destek uzmanı reddetti, final yanıt üretildi."]
+        final_steps = state.get("steps", []) + ["Destek uzmanı reddetti, final yanıt üretildi."]
 
     return {"final_response": response, "steps": final_steps}
 
@@ -198,27 +198,30 @@ def build_graph():
     graph.add_node("validate_order", validate_order_node)
     graph.add_node("extract", extract_node)
     graph.add_node("auto_respond", auto_respond_node)
+    graph.add_node("prepare_approval", prepare_approval_node)
     graph.add_node("await_approval", await_approval_node)
 
     graph.set_entry_point("validate_order")
 
     graph.add_conditional_edges(
-            "validate_order",
-            route_by_order_validity,
-            {
-                "invalid": END,
-                "valid": "extract",
-            }
-        )
+        "validate_order",
+        route_by_order_validity,
+        {
+            "valid": "extract",
+            "invalid": END,
+        }
+    )
+
     graph.add_conditional_edges(
         "extract",
         route_by_risk,
         {
             "not_risky": "auto_respond",
-            "risky": "await_approval",
+            "risky": "prepare_approval",
         }
     )
 
+    graph.add_edge("prepare_approval", "await_approval")
     graph.add_edge("auto_respond", END)
     graph.add_edge("await_approval", END)
 

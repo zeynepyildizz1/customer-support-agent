@@ -1,6 +1,7 @@
 import uuid
 from fastapi import APIRouter
 
+import os
 from app.schemas.ticket import TicketRequest, TicketResponse
 from app.schemas.ticket import ResumeRequest
 from fastapi import HTTPException
@@ -17,8 +18,13 @@ router = APIRouter()
 
 @router.get("/health")
 async def health():
-    return {"status": "ok"}
-
+    groq_configured = bool(os.environ.get("GROQ_API_KEY"))
+    return {
+        "status": "ok" if groq_configured else "degraded",
+        "dependencies": {
+            "groq_api_key_configured": groq_configured
+        }
+    }
 
 @router.post("/tickets", response_model=TicketResponse)
 async def create_ticket(request: TicketRequest):
